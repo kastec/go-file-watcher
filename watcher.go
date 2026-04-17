@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,8 +159,12 @@ func priority(ct FileChangeType) int {
 func fillFromDisk(ch *FileChange, absPath string) {
 	info, err := os.Stat(absPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			ch.ChangeType = Removed
+		}
 		return
 	}
+
 	ch.IsFile = !info.IsDir()
 
 	if ch.IsFile {
