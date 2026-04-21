@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"image/color"
+	"time"
+)
 
 // FileChangeType описывает тип изменения файла или каталога.
 type FileChangeType int
@@ -47,4 +50,6 @@ type DiskItemInfo struct {
 	Items      []*DiskItemInfo
 	ChangeType FileChangeType
 	ChangeTime time.Time
+	IsUpdating bool
+	Color      color.Color
 }

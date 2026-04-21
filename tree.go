@@ -18,6 +18,7 @@ func ScanDir(rootPath string) (*DiskItemInfo, error) {
 	root := &DiskItemInfo{
 		Name:   info.Name(),
 		IsFile: false,
+		Color:  defaultDirTextColor,
 	}
 
 	if err := scanChildren(root, rootPath); err != nil {
@@ -35,9 +36,14 @@ func scanChildren(node *DiskItemInfo, dirPath string) error {
 	}
 
 	for _, entry := range entries {
+		c := defaultDirTextColor
+		if !entry.IsDir() {
+			c = defaultFileTextColor
+		}
 		child := &DiskItemInfo{
 			Name:   entry.Name(),
 			IsFile: !entry.IsDir(),
+			Color:  c,
 		}
 
 		if entry.IsDir() {
@@ -106,7 +112,14 @@ func AddNode(root *DiskItemInfo, change FileChange) {
 		child := findChild(current, part)
 
 		if child == nil {
-			child = &DiskItemInfo{Name: part}
+			c := defaultDirTextColor
+			if isLast && change.IsFile {
+				c = defaultFileTextColor
+			}
+			child = &DiskItemInfo{
+				Name:  part,
+				Color: c,
+			}
 			current.Items = append(current.Items, child)
 		}
 
@@ -115,8 +128,19 @@ func AddNode(root *DiskItemInfo, change FileChange) {
 			child.Size = change.Size
 			child.ChangeType = change.ChangeType
 			child.ChangeTime = change.Time
+			switch change.ChangeType {
+			case Created, Modified, Renamed:
+				child.IsUpdating = true
+				// Созданный/изменённый — стартовый цвет.
+				child.Color = changedFileColor
+			default:
+				// None / Removed не должны попадать в AddNode с конечным узлом.
+			}
 		} else {
 			child.IsFile = false
+			if child.Color == nil {
+				child.Color = defaultDirTextColor
+			}
 		}
 
 		current = child
@@ -142,7 +166,8 @@ func RemoveNode(root *DiskItemInfo, relPath string) {
 // ApplyChange применяет одно событие изменения к дереву.
 //
 //   - Created / Modified → добавить или обновить узел
-//   - Removed            → удалить узел
+//   - Removed            → пометить узел (анимация), фактическое удаление
+//     из дерева после ChangingColorTime в treeColorAnimator
 //   - Renamed            → удалить старый узел (FullPath уже новый путь),
 //     добавить новый с ChangeType = Renamed
 func ApplyChange(root *DiskItemInfo, ch FileChange) {
@@ -151,7 +176,14 @@ func ApplyChange(root *DiskItemInfo, ch FileChange) {
 		AddNode(root, ch)
 
 	case Removed:
-		RemoveNode(root, ch.FullPath)
+		node := FindNode(root, ch.FullPath)
+		if node == nil {
+			return
+		}
+		node.ChangeType = Removed
+		node.ChangeTime = ch.Time
+		node.IsUpdating = true
+		node.Color = removedColor
 
 	case Renamed:
 		// fswatcher на Windows присылает EventRename на старый путь (удалить)

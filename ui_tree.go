@@ -37,6 +37,8 @@ func RunTreeUI(
 	defer screen.Fini()
 
 	var mu sync.RWMutex
+	repaintCh := make(chan struct{}, 1)
+	anim := newTreeColorAnimator(tree, &mu, ctx, repaintCh)
 
 	screen.Clear()
 	renderTree(screen, tree, &mu)
@@ -66,7 +68,13 @@ func RunTreeUI(
 			mu.Lock()
 			ApplyChange(tree, ch)
 			mu.Unlock()
+			anim.Notify()
 
+			screen.Clear()
+			renderTree(screen, tree, &mu)
+			screen.Show()
+
+		case <-repaintCh:
 			screen.Clear()
 			renderTree(screen, tree, &mu)
 			screen.Show()
@@ -76,8 +84,8 @@ func RunTreeUI(
 			case *tcell.EventResize:
 				screen.Sync()
 				screen.Clear()
-			renderTree(screen, tree, &mu)
-			screen.Show()
+				renderTree(screen, tree, &mu)
+				screen.Show()
 
 			case *tcell.EventKey:
 				if isQuitKey(e) {
@@ -103,7 +111,9 @@ func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex) {
 
 	row := 0
 	rootLabel := root.Name + "/"
-	drawString(screen, 0, row, rootLabel, tcell.StyleDefault.Bold(true))
+	drawString(screen, 0, row, rootLabel, tcell.StyleDefault.Bold(true).Foreground(
+		tcell.NewRGBColor(int32(defaultDirTextColor.R), int32(defaultDirTextColor.G), int32(defaultDirTextColor.B)),
+	))
 	row++
 
 	// Для потомков корня начинаем с пустого префикса и рассчитываем,
@@ -123,14 +133,20 @@ func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast boo
 		nextPrefix = prefix + "  "
 	}
 
-	var label string
+	prefixPart := prefix + branch
+	x := runeLen(prefixPart)
+	drawString(screen, 0, *row, prefixPart, pseudoStyle())
 	if node.IsFile {
-		label = fmt.Sprintf("%s%s%s  %s", prefix, branch, node.Name, formatSize(node.Size))
+		namePart := node.Name
+		drawString(screen, x, *row, namePart, itemStyle(node))
+		x += runeLen(namePart)
+		sep := "  "
+		drawString(screen, x, *row, sep, itemStyle(node))
+		x += runeLen(sep)
+		drawString(screen, x, *row, formatSize(node.Size), fileSizeStyle())
 	} else {
-		label = fmt.Sprintf("%s%s%s/", prefix, branch, node.Name)
+		drawString(screen, x, *row, fmt.Sprintf("%s/", node.Name), itemStyle(node))
 	}
-
-	drawString(screen, 0, *row, label, tcell.StyleDefault)
 	*row++
 
 	children := sortedItems(node.Items)
@@ -163,6 +179,43 @@ func sortItems(items []*DiskItemInfo) {
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Name < items[j].Name
 	})
+}
+
+func itemStyle(node *DiskItemInfo) tcell.Style {
+	c := node.Color
+	if c == nil {
+		if node.IsFile {
+			c = defaultFileTextColor
+		} else {
+			c = defaultDirTextColor
+		}
+	}
+	r16, g16, b16, _ := c.RGBA()
+	return tcell.StyleDefault.Foreground(
+		tcell.NewRGBColor(int32(r16>>8), int32(g16>>8), int32(b16>>8)),
+	)
+}
+
+func pseudoStyle() tcell.Style {
+	r16, g16, b16, _ := pseudoGraphicsColor.RGBA()
+	return tcell.StyleDefault.Foreground(
+		tcell.NewRGBColor(int32(r16>>8), int32(g16>>8), int32(b16>>8)),
+	)
+}
+
+func fileSizeStyle() tcell.Style {
+	r16, g16, b16, _ := fileSizeTextColor.RGBA()
+	return tcell.StyleDefault.Foreground(
+		tcell.NewRGBColor(int32(r16>>8), int32(g16>>8), int32(b16>>8)),
+	)
+}
+
+func runeLen(s string) int {
+	n := 0
+	for range s {
+		n++
+	}
+	return n
 }
 
 // drawString выводит строку s на экран начиная с позиции (x, y).
