@@ -9,7 +9,7 @@ import (
 
 const (
 	defaultRootFolder = "d:/0/1"
-	useListUI         = true
+	useListUI         = false
 )
 
 func main() {

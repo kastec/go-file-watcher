@@ -53,14 +53,41 @@ func RunWatcher(
 			}
 
 			for _, ch := range convertEvent(event, absRoot) {
-				select {
-				case out <- ch:
-				case <-ctx.Done():
+				if sent := dispatchChange(ctx, ch, absRoot, out); !sent {
 					fsw.Close()
 					return nil
 				}
 			}
 		}
+	}
+}
+
+// dispatchChange отправляет ch в канал out.
+// Если файл существует, но его размер ещё не известен (Size == 0), запускает
+// горутину, которая ждёт стабилизации размера и только потом шлёт событие.
+// Возвращает false, если ctx был отменён во время синхронной отправки.
+func dispatchChange(ctx context.Context, ch FileChange, absRoot string, out chan<- FileChange) bool {
+	if ch.IsFile && ch.Size == 0 && ch.ChangeType != None && ch.ChangeType != Removed {
+		go func(ch FileChange) {
+			absPath := filepath.Join(absRoot, ch.FullPath)
+			size, err := WaitForStableSize(ctx, absPath, 100*time.Millisecond)
+			if err != nil {
+				return
+			}
+			ch.Size = size
+			select {
+			case out <- ch:
+			case <-ctx.Done():
+			}
+		}(ch)
+		return true
+	}
+
+	select {
+	case out <- ch:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
