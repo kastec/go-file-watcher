@@ -27,7 +27,7 @@ folder-monitor/
 ├── types.go     # FileChangeType, FileChange, DiskItemInfo
 ├── watcher.go   # Обёртка над fswatcher, конвертация WatchEvent → FileChange
 ├── tree.go      # Начальное сканирование, поиск/добавление/удаление узлов
-├── ui.go        # Рендеринг дерева через tcell
+├── ui_tree.go   # Рендеринг дерева через tcell
 ├── go.mod
 └── go.sum
 ```
@@ -47,7 +47,7 @@ flowchart LR
     W --> CH
     subgraph main [Главная горутина]
         T[tree.go\nобновление DiskItemInfo]
-        UI[ui.go\nрендер tcell]
+        UI[ui_tree.go\nрендер tcell]
         T --> UI
     end
     CH --> T
@@ -129,7 +129,7 @@ type DiskItemInfo struct {
 
 ## Фаза 4: UI — отрисовка через tcell
 
-**Файл:** `ui.go`
+**Файл:** `ui_tree.go`
 
 - Инициализация `tcell.NewScreen()`
 - Функция `renderTree(s tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex)` — рекурсивный обход:
