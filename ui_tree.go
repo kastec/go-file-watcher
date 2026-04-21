@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/gdamore/tcell/v2"
@@ -103,36 +102,40 @@ func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex) {
 	defer mu.RUnlock()
 
 	row := 0
-	drawItem(screen, root, 0, &row, true)
+	rootLabel := root.Name + "/"
+	drawString(screen, 0, row, rootLabel, tcell.StyleDefault.Bold(true))
+	row++
+
+	// Для потомков корня начинаем с пустого префикса и рассчитываем,
+	// является ли элемент последним, чтобы выбрать ├─ или └─.
+	children := sortedItems(root.Items)
+	for i, child := range children {
+		drawItem(screen, child, "", i == len(children)-1, &row)
+	}
 }
 
-// drawItem рекурсивно рисует один узел и его потомков.
-// isRoot — признак корневого узла (отображается без отступа и без префикса).
-func drawItem(screen tcell.Screen, node *DiskItemInfo, depth int, row *int, isRoot bool) {
-	if isRoot {
-		label := node.Name + "/"
-		drawString(screen, 0, *row, label, tcell.StyleDefault.Bold(true))
-		*row++
+// drawItem рекурсивно рисует узел с псевдографикой.
+func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast bool, row *int) {
+	branch := "├─"
+	nextPrefix := prefix + "│ "
+	if isLast {
+		branch = "└─"
+		nextPrefix = prefix + "  "
+	}
+
+	var label string
+	if node.IsFile {
+		label = fmt.Sprintf("%s%s%s  %s", prefix, branch, node.Name, formatSize(node.Size))
 	} else {
-		indent := strings.Repeat(" ", (depth-1)*2)
-
-		var label string
-		if node.IsFile {
-			label = fmt.Sprintf("%s |-%-30s %s", indent, node.Name, formatSize(node.Size))
-		} else {
-			label = fmt.Sprintf("%s |+%s/", indent, node.Name)
-		}
-		drawString(screen, 0, *row, label, tcell.StyleDefault)
-		*row++
+		label = fmt.Sprintf("%s%s%s/", prefix, branch, node.Name)
 	}
 
-	// каталоги сначала, затем файлы
-	dirs, files := splitItems(node.Items)
-	for _, child := range dirs {
-		drawItem(screen, child, depth+1, row, false)
-	}
-	for _, child := range files {
-		drawItem(screen, child, depth+1, row, false)
+	drawString(screen, 0, *row, label, tcell.StyleDefault)
+	*row++
+
+	children := sortedItems(node.Items)
+	for i, child := range children {
+		drawItem(screen, child, nextPrefix, i == len(children)-1, row)
 	}
 }
 
@@ -151,6 +154,11 @@ func splitItems(items []*DiskItemInfo) (dirs, files []*DiskItemInfo) {
 	return
 }
 
+func sortedItems(items []*DiskItemInfo) []*DiskItemInfo {
+	dirs, files := splitItems(items)
+	return append(dirs, files...)
+}
+
 func sortItems(items []*DiskItemInfo) {
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Name < items[j].Name
@@ -159,8 +167,10 @@ func sortItems(items []*DiskItemInfo) {
 
 // drawString выводит строку s на экран начиная с позиции (x, y).
 func drawString(screen tcell.Screen, x, y int, s string, style tcell.Style) {
-	for i, r := range s {
-		screen.SetContent(x+i, y, r, nil, style)
+	col := x
+	for _, r := range s {
+		screen.SetContent(col, y, r, nil, style)
+		col++
 	}
 }
 
