@@ -41,15 +41,45 @@ func filterItemsForDiff(items []*DiskItemInfo) []*DiskItemInfo {
 
 // renderTree отрисовывает дерево DiskItemInfo на экране построчно.
 // Если diffOnly, выводятся только ветки, где у узла или потомка IsUpdating.
-func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex, diffOnly bool) {
+// verticalOffset — пропуск первых строк; сброс/ограничение по числу строк с прошлой отрисовки (lastLineCount).
+// После отрисовки в *lastLineCount записывается фактическое число строк (для следующего кадра).
+func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex, diffOnly bool, verticalOffset, lastLineCount *int) {
 	mu.RLock()
 	defer mu.RUnlock()
 
+	w, h := screen.Size()
+	if w <= 0 || h <= 1 {
+		return
+	}
+	contentRows := h - 1
+	if contentRows < 0 {
+		contentRows = 0
+	}
+
+	prev := *lastLineCount
+	if prev > 0 {
+		if prev <= contentRows {
+			*verticalOffset = 0
+		} else {
+			maxOff := prev - contentRows
+			if *verticalOffset > maxOff {
+				*verticalOffset = maxOff
+			}
+		}
+	}
+	if *verticalOffset < 0 {
+		*verticalOffset = 0
+	}
+	off := *verticalOffset
+
 	row := 0
 	rootLabel := root.Name + "/"
-	drawString(screen, 0, row, rootLabel, tcell.StyleDefault.Bold(true).Foreground(
-		tcell.NewRGBColor(int32(defaultDirTextColor.R), int32(defaultDirTextColor.G), int32(defaultDirTextColor.B)),
-	))
+	screenY := row - off
+	if contentRows > 0 && screenY >= 0 && screenY < contentRows {
+		drawString(screen, 0, screenY, rootLabel, tcell.StyleDefault.Bold(true).Foreground(
+			tcell.NewRGBColor(int32(defaultDirTextColor.R), int32(defaultDirTextColor.G), int32(defaultDirTextColor.B)),
+		))
+	}
 	row++
 
 	children := sortedItems(root.Items)
@@ -57,17 +87,23 @@ func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex, diffO
 		children = filterItemsForDiff(children)
 	}
 	if diffOnly && len(children) == 0 {
-		drawString(screen, 0, row, "(нет элементов с IsUpdating)", tcell.StyleDefault.Dim(true))
+		screenY = row - off
+		if contentRows > 0 && screenY >= 0 && screenY < contentRows {
+			drawString(screen, 0, screenY, "(none)", tcell.StyleDefault.Dim(true))
+		}
+		row++
+		*lastLineCount = row
 		return
 	}
 
 	for i, child := range children {
-		drawItem(screen, child, "", i == len(children)-1, &row, diffOnly)
+		drawItem(screen, child, "", i == len(children)-1, &row, diffOnly, off, contentRows)
 	}
+	*lastLineCount = row
 }
 
 // drawItem рекурсивно рисует узел с псевдографикой.
-func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast bool, row *int, diffOnly bool) {
+func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast bool, row *int, diffOnly bool, verticalOffset, contentRows int) {
 	branch := "├─"
 	nextPrefix := prefix + "│ "
 	if isLast {
@@ -75,19 +111,24 @@ func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast boo
 		nextPrefix = prefix + "  "
 	}
 
-	prefixPart := prefix + branch
-	x := runeLen(prefixPart)
-	drawString(screen, 0, *row, prefixPart, pseudoStyle())
-	if node.IsFile {
-		namePart := node.Name
-		drawString(screen, x, *row, namePart, itemStyle(node))
-		x += runeLen(namePart)
-		sep := "  "
-		drawString(screen, x, *row, sep, itemStyle(node))
-		x += runeLen(sep)
-		drawString(screen, x, *row, formatSize(node.Size), fileSizeStyle())
-	} else {
-		drawString(screen, x, *row, fmt.Sprintf("%s/", node.Name), itemStyle(node))
+	logicalY := *row
+	screenY := logicalY - verticalOffset
+	inWindow := contentRows > 0 && screenY >= 0 && screenY < contentRows
+	if inWindow {
+		prefixPart := prefix + branch
+		x := runeLen(prefixPart)
+		drawString(screen, 0, screenY, prefixPart, pseudoStyle())
+		if node.IsFile {
+			namePart := node.Name
+			drawString(screen, x, screenY, namePart, itemStyle(node))
+			x += runeLen(namePart)
+			sep := "  "
+			drawString(screen, x, screenY, sep, itemStyle(node))
+			x += runeLen(sep)
+			drawString(screen, x, screenY, formatSize(node.Size), fileSizeStyle())
+		} else {
+			drawString(screen, x, screenY, fmt.Sprintf("%s/", node.Name), itemStyle(node))
+		}
 	}
 	*row++
 
@@ -96,7 +137,7 @@ func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast boo
 		children = filterItemsForDiff(children)
 	}
 	for i, child := range children {
-		drawItem(screen, child, nextPrefix, i == len(children)-1, row, diffOnly)
+		drawItem(screen, child, nextPrefix, i == len(children)-1, row, diffOnly, verticalOffset, contentRows)
 	}
 }
 

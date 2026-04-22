@@ -50,6 +50,8 @@ func RunMainUI(
 	anim := newTreeColorAnimator(tree, &mu, ctx, repaintCh)
 
 	mode := appViewTree
+	var verticalOffset int
+	var lastRenderedTreeLines int
 
 	redraw := func() {
 		if mode == appViewTreeDiff {
@@ -62,9 +64,9 @@ func RunMainUI(
 		case appViewList:
 			renderChangeLog(screen, changeLog)
 		case appViewTree:
-			renderTree(screen, tree, &mu, false)
+			renderTree(screen, tree, &mu, false, &verticalOffset, &lastRenderedTreeLines)
 		case appViewTreeDiff:
-			renderTree(screen, tree, &mu, true)
+			renderTree(screen, tree, &mu, true, &verticalOffset, &lastRenderedTreeLines)
 		}
 		drawStatusLine(screen, mode)
 		screen.Show()
@@ -119,16 +121,36 @@ func RunMainUI(
 					cancel()
 					return
 				}
+				switch e.Key() {
+				case tcell.KeyUp:
+					if mode == appViewTree || mode == appViewTreeDiff {
+						if verticalOffset > 0 {
+							verticalOffset--
+							redraw()
+						}
+					}
+				case tcell.KeyDown:
+					if mode == appViewTree || mode == appViewTreeDiff {
+						verticalOffset++
+						redraw()
+					}
+				}
 				if e.Key() == tcell.KeyRune {
 					switch e.Rune() {
 					case '1':
 						mode = appViewList
+						verticalOffset = 0
+						lastRenderedTreeLines = 0
 						redraw()
 					case '2':
 						mode = appViewTree
+						verticalOffset = 0
+						lastRenderedTreeLines = 0
 						redraw()
 					case '3':
 						mode = appViewTreeDiff
+						verticalOffset = 0
+						lastRenderedTreeLines = 0
 						redraw()
 					}
 				}
