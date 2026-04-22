@@ -8,6 +8,8 @@ import (
 const (
 	// ChangingColorTime — длительность плавного перехода цвета к цвету по умолчанию.
 	ChangingColorTime = 2 * time.Second
+	// ChangingColorTimeDiff — то же в режиме отображения Diff (дерево только с IsUpdating).
+	ChangingColorTimeDiff = 3 * time.Second
 	// UpdateTreePeriod — период обхода дерева и пересчёта цветов.
 	UpdateTreePeriod = 100 * time.Millisecond
 )

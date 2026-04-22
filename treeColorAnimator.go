@@ -30,19 +30,19 @@ func endColorForUpdatingNode(node *DiskItemInfo) color.Color {
 	return defaultColorForNode(node)
 }
 
-func applyTreeColors(root *DiskItemInfo, now time.Time) (needRepaint bool) {
-	return walkItems(&root.Items, now)
+func applyTreeColors(root *DiskItemInfo, now time.Time, blend time.Duration) (needRepaint bool) {
+	return walkItems(&root.Items, now, blend)
 }
 
-func walkItems(items *[]*DiskItemInfo, now time.Time) (needRepaint bool) {
+func walkItems(items *[]*DiskItemInfo, now time.Time, blend time.Duration) (needRepaint bool) {
 	for i := 0; i < len(*items); {
 		node := (*items)[i]
-		if walkItems(&node.Items, now) {
+		if walkItems(&node.Items, now, blend) {
 			needRepaint = true
 		}
 		if node.IsUpdating {
 			elapsed := now.Sub(node.ChangeTime)
-			if elapsed >= ChangingColorTime {
+			if elapsed >= blend {
 				if node.ChangeType == Removed {
 					*items = append((*items)[:i], (*items)[i+1:]...)
 					needRepaint = true
@@ -54,7 +54,7 @@ func walkItems(items *[]*DiskItemInfo, now time.Time) (needRepaint bool) {
 			} else {
 				start := startColorForNode(node)
 				end := endColorForUpdatingNode(node)
-				node.Color = calcColor(node.ChangeTime, now, start, end)
+				node.Color = calcColor(node.ChangeTime, now, start, end, blend)
 				needRepaint = true
 			}
 		}
@@ -70,16 +70,28 @@ type treeColorAnimator struct {
 	ctx     context.Context
 	repaint chan<- struct{}
 
-	running atomic.Bool
+	running   atomic.Bool
+	blendNano atomic.Int64 // time.Duration наносекунды; по умолчанию ChangingColorTime
 }
 
 func newTreeColorAnimator(tree *DiskItemInfo, mu *sync.RWMutex, ctx context.Context, repaint chan<- struct{}) *treeColorAnimator {
-	return &treeColorAnimator{
+	a := &treeColorAnimator{
 		tree:    tree,
 		mu:      mu,
 		ctx:     ctx,
 		repaint: repaint,
 	}
+	a.blendNano.Store(int64(ChangingColorTime))
+	return a
+}
+
+// SetBlendDuration задаёт длительность перехода цвета (например ChangingColorTimeDiff в режиме Diff).
+func (a *treeColorAnimator) SetBlendDuration(d time.Duration) {
+	a.blendNano.Store(int64(d))
+}
+
+func (a *treeColorAnimator) blendDuration() time.Duration {
+	return time.Duration(a.blendNano.Load())
 }
 
 // Notify запускает фоновый цикл обновления цветов, если он ещё не выполняется.
@@ -103,7 +115,7 @@ func (a *treeColorAnimator) run() {
 		case <-ticker.C:
 			a.mu.Lock()
 			now := time.Now()
-			needRepaint := applyTreeColors(a.tree, now)
+			needRepaint := applyTreeColors(a.tree, now, a.blendDuration())
 			//keepRunning := needRepaint || anyUpdating(a.tree)
 			a.mu.Unlock()
 
@@ -123,11 +135,10 @@ func (a *treeColorAnimator) run() {
 	}
 }
 
-// calcColor линейно интерполирует цвет от start к end по времени с ChangeTime до now
-// на интервале ChangingColorTime.
-func calcColor(changeTime, now time.Time, start, end color.Color) color.Color {
+// calcColor линейно интерполирует цвет от start к end по времени с ChangeTime до now на интервале blend.
+func calcColor(changeTime, now time.Time, start, end color.Color, blend time.Duration) color.Color {
 	d := now.Sub(changeTime)
-	t := float64(d) / float64(ChangingColorTime)
+	t := float64(d) / float64(blend)
 	if t < 0 {
 		t = 0
 	}

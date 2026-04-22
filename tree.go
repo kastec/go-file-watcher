@@ -167,7 +167,7 @@ func RemoveNode(root *DiskItemInfo, relPath string) {
 //
 //   - Created / Modified → добавить или обновить узел
 //   - Removed            → пометить узел (анимация), фактическое удаление
-//     из дерева после ChangingColorTime в treeColorAnimator
+//     из дерева после интервала анимации цвета в treeColorAnimator (ChangingColorTime или ChangingColorTimeDiff)
 //   - Renamed            → удалить старый узел (FullPath уже новый путь),
 //     добавить новый с ChangeType = Renamed
 func ApplyChange(root *DiskItemInfo, ch FileChange) {

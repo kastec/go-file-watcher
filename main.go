@@ -7,10 +7,7 @@ import (
 	"os"
 )
 
-const (
-	defaultRootFolder = "d:/0/1"
-	useListUI         = false
-)
+const defaultRootFolder = "d:/0/1"
 
 func main() {
 	var rootFolder string
@@ -39,9 +36,5 @@ func main() {
 		}
 	}()
 
-	if useListUI {
-		RunListUI(ctx, cancel, updates)
-	} else {
-		RunTreeUI(ctx, cancel, rootFolder, updates)
-	}
+	RunMainUI(ctx, cancel, rootFolder, updates)
 }

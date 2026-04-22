@@ -1,101 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 
 	"github.com/gdamore/tcell/v2"
 )
-
-// RunTreeUI сканирует rootFolder, отрисовывает дерево и обрабатывает события.
-// Применяет входящие FileChange к дереву и перерисовывает экран.
-// Завершается при нажатии q / Escape / Ctrl+C или при отмене ctx.
-func RunTreeUI(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	rootFolder string,
-	updates <-chan FileChange,
-) {
-	tree, err := ScanDir(rootFolder)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ошибка сканирования каталога: %v\n", err)
-		os.Exit(1)
-	}
-
-	screen, err := tcell.NewScreen()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ошибка инициализации экрана: %v\n", err)
-		os.Exit(1)
-	}
-	if err := screen.Init(); err != nil {
-		fmt.Fprintf(os.Stderr, "ошибка инициализации экрана: %v\n", err)
-		os.Exit(1)
-	}
-	defer screen.Fini()
-
-	var mu sync.RWMutex
-	repaintCh := make(chan struct{}, 1)
-	anim := newTreeColorAnimator(tree, &mu, ctx, repaintCh)
-
-	screen.Clear()
-	renderTree(screen, tree, &mu)
-	screen.Show()
-
-	events := make(chan tcell.Event, 16)
-	go func() {
-		for {
-			ev := screen.PollEvent()
-			if ev == nil {
-				return
-			}
-			select {
-			case events <- ev:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case ch := <-updates:
-			mu.Lock()
-			ApplyChange(tree, ch)
-			mu.Unlock()
-			anim.Notify()
-
-			screen.Clear()
-			renderTree(screen, tree, &mu)
-			screen.Show()
-
-		case <-repaintCh:
-			screen.Clear()
-			renderTree(screen, tree, &mu)
-			screen.Show()
-
-		case ev := <-events:
-			switch e := ev.(type) {
-			case *tcell.EventResize:
-				screen.Sync()
-				screen.Clear()
-				renderTree(screen, tree, &mu)
-				screen.Show()
-
-			case *tcell.EventKey:
-				if isQuitKey(e) {
-					cancel()
-					return
-				}
-			}
-		}
-	}
-}
 
 // isQuitKey возвращает true для q, Escape и Ctrl+C.
 func isQuitKey(e *tcell.EventKey) bool {
@@ -104,8 +15,33 @@ func isQuitKey(e *tcell.EventKey) bool {
 		(e.Key() == tcell.KeyRune && e.Rune() == 'q')
 }
 
+// visibleInDiffTree — узел показывается в режиме diff, если сам IsUpdating
+// или среди потомков есть узел с IsUpdating (чтобы сохранить путь в дереве).
+func visibleInDiffTree(n *DiskItemInfo) bool {
+	if n.IsUpdating {
+		return true
+	}
+	for _, c := range n.Items {
+		if visibleInDiffTree(c) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterItemsForDiff(items []*DiskItemInfo) []*DiskItemInfo {
+	var out []*DiskItemInfo
+	for _, it := range sortedItems(items) {
+		if visibleInDiffTree(it) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 // renderTree отрисовывает дерево DiskItemInfo на экране построчно.
-func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex) {
+// Если diffOnly, выводятся только ветки, где у узла или потомка IsUpdating.
+func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex, diffOnly bool) {
 	mu.RLock()
 	defer mu.RUnlock()
 
@@ -116,16 +52,22 @@ func renderTree(screen tcell.Screen, root *DiskItemInfo, mu *sync.RWMutex) {
 	))
 	row++
 
-	// Для потомков корня начинаем с пустого префикса и рассчитываем,
-	// является ли элемент последним, чтобы выбрать ├─ или └─.
 	children := sortedItems(root.Items)
+	if diffOnly {
+		children = filterItemsForDiff(children)
+	}
+	if diffOnly && len(children) == 0 {
+		drawString(screen, 0, row, "(нет элементов с IsUpdating)", tcell.StyleDefault.Dim(true))
+		return
+	}
+
 	for i, child := range children {
-		drawItem(screen, child, "", i == len(children)-1, &row)
+		drawItem(screen, child, "", i == len(children)-1, &row, diffOnly)
 	}
 }
 
 // drawItem рекурсивно рисует узел с псевдографикой.
-func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast bool, row *int) {
+func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast bool, row *int, diffOnly bool) {
 	branch := "├─"
 	nextPrefix := prefix + "│ "
 	if isLast {
@@ -150,8 +92,11 @@ func drawItem(screen tcell.Screen, node *DiskItemInfo, prefix string, isLast boo
 	*row++
 
 	children := sortedItems(node.Items)
+	if diffOnly {
+		children = filterItemsForDiff(children)
+	}
 	for i, child := range children {
-		drawItem(screen, child, nextPrefix, i == len(children)-1, row)
+		drawItem(screen, child, nextPrefix, i == len(children)-1, row, diffOnly)
 	}
 }
 
