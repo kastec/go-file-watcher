@@ -43,7 +43,7 @@ func RunMainUI(
 	defer screen.Fini()
 
 	var mu sync.RWMutex
-	var changeLog []string
+	var changeLog []FileChange
 	const changeLogMax = 2000
 
 	repaintCh := make(chan struct{}, 1)
@@ -105,10 +105,16 @@ func RunMainUI(
 			return
 
 		case ch := <-updates:
-			line := formatChangeLine(ch)
 			mu.Lock()
+			// Removed: в watcher IsFile не заполняется (файла уже нет на диске).
+			// Берём признак из дерева, иначе каталог ошибочно рисуется в квадратных скобках как путь.
+			if ch.ChangeType == Removed {
+				if n := FindNode(tree, ch.FullPath); n != nil {
+					ch.IsFile = n.IsFile
+				}
+			}
 			ApplyChange(tree, ch)
-			changeLog = append(changeLog, line)
+			changeLog = append(changeLog, ch)
 			if len(changeLog) > changeLogMax {
 				changeLog = changeLog[len(changeLog)-changeLogMax:]
 			}

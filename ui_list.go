@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"os"
 	"os/signal"
 
@@ -125,8 +126,80 @@ func (v *listJournalView) handleScrollPageDown(lineCount, contentRows int) bool 
 	return true
 }
 
+func tcellStyleFromColor(c color.Color) tcell.Style {
+	r16, g16, b16, _ := c.RGBA()
+	return tcell.StyleDefault.Foreground(
+		tcell.NewRGBColor(int32(r16>>8), int32(g16>>8), int32(b16>>8)),
+	)
+}
+
+// changeLogMainStyle — как базовый itemStyle дерева: удалён, файл, каталог.
+func changeLogMainStyle(ch FileChange) tcell.Style {
+	if ch.ChangeType == Removed {
+		return tcellStyleFromColor(removedColor)
+	}
+	if ch.IsFile {
+		return tcellStyleFromColor(defaultFileTextColor)
+	}
+	return tcellStyleFromColor(defaultDirTextColor)
+}
+
+func changeLogPathSegment(ch FileChange) string {
+	if ch.IsFile {
+		return ch.FullPath
+	}
+	dirPath := ch.FullPath
+	if dirPath == "" {
+		dirPath = ch.Name
+	}
+	return fmt.Sprintf("[%s]", dirPath)
+}
+
+// drawChangeLogLineClipped рисует одну запись журнала с теми же цветами, что и дерево.
+func drawChangeLogLineClipped(screen tcell.Screen, x, y, maxW int, ch FileChange) {
+	sw, _ := screen.Size()
+	right := x + maxW
+	if right > sw {
+		right = sw
+	}
+	timeStr := ch.Time.Format("15:04:05.000")
+	meta := fmt.Sprintf(" [%-8s] ", ch.ChangeType.String())
+	mainStyle := changeLogMainStyle(ch)
+	metaStyle := tcell.StyleDefault
+	switch ch.ChangeType {
+	case Removed:
+		metaStyle = tcellStyleFromColor(removedColor)
+	case Created:
+		metaStyle = tcellStyleFromColor(changedFileColor)
+	}
+	col := x
+	drawSeg := func(s string, st tcell.Style) {
+		if col >= right {
+			return
+		}
+		budget := right - col
+		if budget > len(s) {
+			screen.PutStrStyled(col, y, s, st)
+			col += len(s)
+		} else {
+			rs := []rune(s)
+			clipped := string(rs[:budget])
+			screen.PutStrStyled(col, y, clipped, st)
+			col += runeLen(clipped)
+		}
+	}
+
+	drawSeg(timeStr, fileSizeStyle())
+	drawSeg(meta, metaStyle)
+	drawSeg(changeLogPathSegment(ch), mainStyle)
+	if ch.IsFile && !(ch.ChangeType == Removed && ch.Size == 0) {
+		drawSeg(" ", mainStyle)
+		drawSeg(formatSize(ch.Size), fileSizeStyle())
+	}
+}
+
 // renderChangeLog рисует журнал; расчёт первой строки и правки verticalOffsetLine — здесь.
-func renderChangeLog(screen tcell.Screen, lines []string, view *listJournalView) {
+func renderChangeLog(screen tcell.Screen, lines []FileChange, view *listJournalView) {
 	w, h := screen.Size()
 	if w <= 0 || h <= 1 {
 		return
@@ -166,41 +239,24 @@ func renderChangeLog(screen tcell.Screen, lines []string, view *listJournalView)
 			start = off
 		}
 	}
-	for i, line := range lines[start:] {
+	for i, ch := range lines[start:] {
 		if i >= contentRows {
 			break
 		}
-		style := tcell.StyleDefault
-		drawStringClipped(screen, 0, i, line, w, style)
-	}
-}
-
-// drawStringClipped обрезает строку по ширине экрана (по рунам).
-func drawStringClipped(screen tcell.Screen, x, y int, s string, maxWidth int, style tcell.Style) {
-	col := x
-	for _, r := range s {
-		if col >= maxWidth {
-			break
-		}
-		screen.SetContent(col, y, r, nil, style)
-		col++
+		drawChangeLogLineClipped(screen, 0, i, w, ch)
 	}
 }
 
 func formatChangeLine(ch FileChange) string {
-	itemType := "DIR "
 	sizePart := ""
-	if ch.IsFile {
-		itemType = "FILE"
+	if ch.IsFile && !(ch.ChangeType == Removed && ch.Size == 0) {
 		sizePart = " " + formatSize(ch.Size)
 	}
-
 	return fmt.Sprintf(
-		"%s [%-8s] %s %s%s",
+		"%s [%-8s] %s%s",
 		ch.Time.Format("15:04:05.000"),
 		ch.ChangeType.String(),
-		itemType,
-		ch.FullPath,
+		changeLogPathSegment(ch),
 		sizePart,
 	)
 }
