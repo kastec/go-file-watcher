@@ -13,10 +13,51 @@ import (
 type appViewMode int
 
 const (
-	appViewList appViewMode = iota // журнал изменений (как ui_list)
-	appViewTree                    // полное дерево
-	appViewTreeDiff                // дерево: только ветки с IsUpdating
+	appViewList     appViewMode = iota // журнал изменений (как ui_list)
+	appViewTree                        // полное дерево
+	appViewTreeDiff                    // дерево: только ветки с IsUpdating
 )
+
+// Состояние основного UI (один экземпляр на процесс; заполняется в RunMainUI).
+var (
+	tScreen               tcell.Screen
+	uiMutex               sync.RWMutex
+	changeLog             []FileChange
+	viewMode              appViewMode
+	prevViewMode          appViewMode
+	mainUIListView        *listJournalView
+	verticalOffset        int
+	mainUITree            *DiskItemInfo
+	colAnimator           *treeColorAnimator
+	lastRenderedTreeLines int
+)
+
+func mainRedraw() {
+	if viewMode == appViewList && prevViewMode != appViewList {
+		mainUIListView.resetScroll()
+	}
+	if (viewMode == appViewTree || viewMode == appViewTreeDiff) && prevViewMode != viewMode {
+		verticalOffset = 0
+		lastRenderedTreeLines = 0
+	}
+	if viewMode == appViewTreeDiff {
+		colAnimator.SetBlendDuration(ChangingColorTimeDiff)
+	} else {
+		colAnimator.SetBlendDuration(ChangingColorTime)
+	}
+	tScreen.Clear()
+	switch viewMode {
+	case appViewList:
+		renderChangeLog(tScreen, changeLog, mainUIListView)
+	case appViewTree:
+		renderTree(tScreen, mainUITree, &uiMutex, false, &verticalOffset, &lastRenderedTreeLines)
+	case appViewTreeDiff:
+		renderTree(tScreen, mainUITree, &uiMutex, true, &verticalOffset, &lastRenderedTreeLines)
+	}
+	drawStatusLine(tScreen, viewMode)
+	tScreen.Show()
+	prevViewMode = viewMode
+}
 
 // RunMainUI — основной цикл: дерево по умолчанию, переключение 1/2/3, выход q/Esc/Ctrl+C.
 func RunMainUI(
@@ -42,52 +83,26 @@ func RunMainUI(
 	}
 	defer screen.Fini()
 
-	var mu sync.RWMutex
-	var changeLog []FileChange
+	tScreen = screen
+	changeLog = nil
 	const changeLogMax = 2000
 
 	repaintCh := make(chan struct{}, 1)
-	anim := newTreeColorAnimator(tree, &mu, ctx, repaintCh)
+	mainUITree = tree
+	colAnimator = newTreeColorAnimator(tree, &uiMutex, ctx, repaintCh)
 
-	mode := appViewTree
-	prevViewMode := mode
-	var verticalOffset int
-	var lastRenderedTreeLines int
-	listView := newListJournalView()
+	viewMode = appViewTree
+	verticalOffset = 0
+	prevViewMode = viewMode
+	lastRenderedTreeLines = 0
+	mainUIListView = newListJournalView()
 
-	redraw := func() {
-		if mode == appViewList && prevViewMode != appViewList {
-			listView.resetScroll()
-		}
-		if (mode == appViewTree || mode == appViewTreeDiff) && prevViewMode != mode {
-			verticalOffset = 0
-			lastRenderedTreeLines = 0
-		}
-		if mode == appViewTreeDiff {
-			anim.SetBlendDuration(ChangingColorTimeDiff)
-		} else {
-			anim.SetBlendDuration(ChangingColorTime)
-		}
-		screen.Clear()
-		switch mode {
-		case appViewList:
-			renderChangeLog(screen, changeLog, listView)
-		case appViewTree:
-			renderTree(screen, tree, &mu, false, &verticalOffset, &lastRenderedTreeLines)
-		case appViewTreeDiff:
-			renderTree(screen, tree, &mu, true, &verticalOffset, &lastRenderedTreeLines)
-		}
-		drawStatusLine(screen, mode)
-		screen.Show()
-		prevViewMode = mode
-	}
-
-	redraw()
+	mainRedraw()
 
 	events := make(chan tcell.Event, 16)
 	go func() {
 		for {
-			ev := screen.PollEvent()
+			ev := tScreen.PollEvent()
 			if ev == nil {
 				return
 			}
@@ -105,7 +120,7 @@ func RunMainUI(
 			return
 
 		case ch := <-updates:
-			mu.Lock()
+			uiMutex.Lock()
 			// Removed: в watcher IsFile не заполняется (файла уже нет на диске).
 			// Берём признак из дерева, иначе каталог ошибочно рисуется в квадратных скобках как путь.
 			if ch.ChangeType == Removed {
@@ -118,106 +133,98 @@ func RunMainUI(
 			if len(changeLog) > changeLogMax {
 				changeLog = changeLog[len(changeLog)-changeLogMax:]
 			}
-			mu.Unlock()
-			anim.Notify()
+			uiMutex.Unlock()
+			colAnimator.Notify()
 
-			redraw()
+			mainRedraw()
 
 		case <-repaintCh:
-			redraw()
+			mainRedraw()
 
 		case ev := <-events:
 			switch e := ev.(type) {
 			case *tcell.EventResize:
-				screen.Sync()
-				redraw()
+				tScreen.Sync()
+				mainRedraw()
 
 			case *tcell.EventKey:
 				if isQuitKey(e) {
 					cancel()
 					return
 				}
-				switch e.Key() {
-				case tcell.KeyUp:
-					if mode == appViewList {
-						mu.RLock()
-						n := len(changeLog)
-						mu.RUnlock()
-						_, kh := screen.Size()
-						if listView.handleScrollKeyUp(n, kh-1) {
-							redraw()
-						}
-					} else if mode == appViewTree || mode == appViewTreeDiff {
-						if verticalOffset > 0 {
-							verticalOffset--
-							redraw()
-						}
-					}
-				case tcell.KeyDown:
-					if mode == appViewList {
-						mu.RLock()
-						n := len(changeLog)
-						mu.RUnlock()
-						_, kh := screen.Size()
-						if listView.handleScrollKeyDown(n, kh-1) {
-							redraw()
-						}
-					} else if mode == appViewTree || mode == appViewTreeDiff {
-						verticalOffset++
-						redraw()
-					}
-				case tcell.KeyPgUp:
-					if mode == appViewList {
-						mu.RLock()
-						n := len(changeLog)
-						mu.RUnlock()
-						_, kh := screen.Size()
-						if listView.handleScrollPageUp(n, kh-1) {
-							redraw()
-						}
-					} else if mode == appViewTree || mode == appViewTreeDiff {
-						_, kh := screen.Size()
-						page := kh - 1
-						if page > 0 && verticalOffset > 0 {
-							verticalOffset -= page
-							if verticalOffset < 0 {
-								verticalOffset = 0
-							}
-							redraw()
-						}
-					}
-				case tcell.KeyPgDn:
-					if mode == appViewList {
-						mu.RLock()
-						n := len(changeLog)
-						mu.RUnlock()
-						_, kh := screen.Size()
-						if listView.handleScrollPageDown(n, kh-1) {
-							redraw()
-						}
-					} else if mode == appViewTree || mode == appViewTreeDiff {
-						_, kh := screen.Size()
-						page := kh - 1
-						if page > 0 {
-							verticalOffset += page
-							redraw()
-						}
-					}
-				}
-				if e.Key() == tcell.KeyRune {
-					switch e.Rune() {
-					case '1':
-						mode = appViewList
-						redraw()
-					case '2':
-						mode = appViewTree
-						redraw()
-					case '3':
-						mode = appViewTreeDiff
-						redraw()
-					}
-				}
+				handleMainUIKeyEvent(e)
 			}
+		}
+	}
+}
+
+// handleMainUIKeyEvent — прокрутка списка/дерева, переключение режимов 1/2/3. Выход обрабатывается в RunMainUI.
+func handleMainUIKeyEvent(e *tcell.EventKey) {
+	switch viewMode {
+	case appViewList:
+		uiMutex.RLock()
+		n := len(changeLog)
+		uiMutex.RUnlock()
+		_, kh := tScreen.Size()
+		cr := kh - 1
+		switch e.Key() {
+		case tcell.KeyUp:
+			if mainUIListView.handleScrollKeyUp(n, cr) {
+				mainRedraw()
+			}
+		case tcell.KeyDown:
+			if mainUIListView.handleScrollKeyDown(n, cr) {
+				mainRedraw()
+			}
+		case tcell.KeyPgUp:
+			if mainUIListView.handleScrollPageUp(n, cr) {
+				mainRedraw()
+			}
+		case tcell.KeyPgDn:
+			if mainUIListView.handleScrollPageDown(n, cr) {
+				mainRedraw()
+			}
+		}
+	case appViewTree, appViewTreeDiff:
+		switch e.Key() {
+		case tcell.KeyUp:
+			if verticalOffset > 0 {
+				verticalOffset--
+				mainRedraw()
+			}
+		case tcell.KeyDown:
+			verticalOffset++
+			mainRedraw()
+		case tcell.KeyPgUp:
+			_, kh := tScreen.Size()
+			page := kh - 1
+			if page > 0 && verticalOffset > 0 {
+				verticalOffset -= page
+				if verticalOffset < 0 {
+					verticalOffset = 0
+				}
+				mainRedraw()
+			}
+		case tcell.KeyPgDn:
+			_, kh := tScreen.Size()
+			page := kh - 1
+			if page > 0 {
+				verticalOffset += page
+				mainRedraw()
+			}
+		}
+	}
+	if e.Key() == tcell.KeyRune {
+		switch e.Rune() {
+		case '1':
+			viewMode = appViewList
+			mainRedraw()
+		case '2':
+			viewMode = appViewTree
+			mainRedraw()
+		case '3':
+			viewMode = appViewTreeDiff
+			mainRedraw()
 		}
 	}
 }
@@ -231,11 +238,11 @@ func drawStatusLine(screen tcell.Screen, mode appViewMode) {
 	label := "1=list  2=tree  3=diff  q/Esc/Ctrl+C=exit"
 	switch mode {
 	case appViewList:
-		label = "[список] " + label
+		label = "[list] " + label
 	case appViewTree:
-		label = "[дерево] " + label
+		label = "[tree] " + label
 	case appViewTreeDiff:
-		label = "[дерево diff] " + label
+		label = "[tree diff] " + label
 	}
 	w, _ := screen.Size()
 	style := tcell.StyleDefault.Reverse(true)
