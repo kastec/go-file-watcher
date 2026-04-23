@@ -50,10 +50,19 @@ func RunMainUI(
 	anim := newTreeColorAnimator(tree, &mu, ctx, repaintCh)
 
 	mode := appViewTree
+	prevViewMode := mode
 	var verticalOffset int
 	var lastRenderedTreeLines int
+	listView := newListJournalView()
 
 	redraw := func() {
+		if mode == appViewList && prevViewMode != appViewList {
+			listView.resetScroll()
+		}
+		if (mode == appViewTree || mode == appViewTreeDiff) && prevViewMode != mode {
+			verticalOffset = 0
+			lastRenderedTreeLines = 0
+		}
 		if mode == appViewTreeDiff {
 			anim.SetBlendDuration(ChangingColorTimeDiff)
 		} else {
@@ -62,7 +71,7 @@ func RunMainUI(
 		screen.Clear()
 		switch mode {
 		case appViewList:
-			renderChangeLog(screen, changeLog)
+			renderChangeLog(screen, changeLog, listView)
 		case appViewTree:
 			renderTree(screen, tree, &mu, false, &verticalOffset, &lastRenderedTreeLines)
 		case appViewTreeDiff:
@@ -70,6 +79,7 @@ func RunMainUI(
 		}
 		drawStatusLine(screen, mode)
 		screen.Show()
+		prevViewMode = mode
 	}
 
 	redraw()
@@ -123,34 +133,81 @@ func RunMainUI(
 				}
 				switch e.Key() {
 				case tcell.KeyUp:
-					if mode == appViewTree || mode == appViewTreeDiff {
+					if mode == appViewList {
+						mu.RLock()
+						n := len(changeLog)
+						mu.RUnlock()
+						_, kh := screen.Size()
+						if listView.handleScrollKeyUp(n, kh-1) {
+							redraw()
+						}
+					} else if mode == appViewTree || mode == appViewTreeDiff {
 						if verticalOffset > 0 {
 							verticalOffset--
 							redraw()
 						}
 					}
 				case tcell.KeyDown:
-					if mode == appViewTree || mode == appViewTreeDiff {
+					if mode == appViewList {
+						mu.RLock()
+						n := len(changeLog)
+						mu.RUnlock()
+						_, kh := screen.Size()
+						if listView.handleScrollKeyDown(n, kh-1) {
+							redraw()
+						}
+					} else if mode == appViewTree || mode == appViewTreeDiff {
 						verticalOffset++
 						redraw()
+					}
+				case tcell.KeyPgUp:
+					if mode == appViewList {
+						mu.RLock()
+						n := len(changeLog)
+						mu.RUnlock()
+						_, kh := screen.Size()
+						if listView.handleScrollPageUp(n, kh-1) {
+							redraw()
+						}
+					} else if mode == appViewTree || mode == appViewTreeDiff {
+						_, kh := screen.Size()
+						page := kh - 1
+						if page > 0 && verticalOffset > 0 {
+							verticalOffset -= page
+							if verticalOffset < 0 {
+								verticalOffset = 0
+							}
+							redraw()
+						}
+					}
+				case tcell.KeyPgDn:
+					if mode == appViewList {
+						mu.RLock()
+						n := len(changeLog)
+						mu.RUnlock()
+						_, kh := screen.Size()
+						if listView.handleScrollPageDown(n, kh-1) {
+							redraw()
+						}
+					} else if mode == appViewTree || mode == appViewTreeDiff {
+						_, kh := screen.Size()
+						page := kh - 1
+						if page > 0 {
+							verticalOffset += page
+							redraw()
+						}
 					}
 				}
 				if e.Key() == tcell.KeyRune {
 					switch e.Rune() {
 					case '1':
 						mode = appViewList
-						verticalOffset = 0
-						lastRenderedTreeLines = 0
 						redraw()
 					case '2':
 						mode = appViewTree
-						verticalOffset = 0
-						lastRenderedTreeLines = 0
 						redraw()
 					case '3':
 						mode = appViewTreeDiff
-						verticalOffset = 0
-						lastRenderedTreeLines = 0
 						redraw()
 					}
 				}
@@ -180,43 +237,4 @@ func drawStatusLine(screen tcell.Screen, mode appViewMode) {
 		screen.SetContent(x, y, ' ', nil, style)
 	}
 	drawString(screen, 0, y, label, style)
-}
-
-// renderChangeLog рисует журнал событий; последняя строка у нижней границы над статусом.
-func renderChangeLog(screen tcell.Screen, lines []string) {
-	w, h := screen.Size()
-	if w <= 0 || h <= 1 {
-		return
-	}
-	contentRows := h - 1
-	if contentRows <= 0 {
-		return
-	}
-	if len(lines) == 0 {
-		drawString(screen, 0, 0, "Пока нет событий изменений.", tcell.StyleDefault)
-		return
-	}
-	start := 0
-	if len(lines) > contentRows {
-		start = len(lines) - contentRows
-	}
-	for i, line := range lines[start:] {
-		if i >= contentRows {
-			break
-		}
-		style := tcell.StyleDefault
-		drawStringClipped(screen, 0, i, line, w, style)
-	}
-}
-
-// drawStringClipped обрезает строку по ширине экрана (по рунам).
-func drawStringClipped(screen tcell.Screen, x, y int, s string, maxWidth int, style tcell.Style) {
-	col := x
-	for _, r := range s {
-		if col >= maxWidth {
-			break
-		}
-		screen.SetContent(col, y, r, nil, style)
-		col++
-	}
 }
