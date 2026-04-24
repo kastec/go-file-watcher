@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/gdamore/tcell/v2"
@@ -66,6 +67,12 @@ func RunMainUI(
 	rootFolder string,
 	updates <-chan FileChange,
 ) {
+	absRoot, err := filepath.Abs(rootFolder)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ошибка абсолютного пути: %v\n", err)
+		os.Exit(1)
+	}
+
 	tree, err := ScanDir(rootFolder)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ошибка сканирования каталога: %v\n", err)
@@ -122,7 +129,10 @@ func RunMainUI(
 		case ch := <-updates:
 			uiMutex.Lock()
 			var applied bool
-			ch, applied = ApplyChange(tree, ch)
+			ch, applied, err := ApplyChange(tree, ch, absRoot)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "пересканирование каталога: %v\n", err)
+			}
 			if applied {
 				changeLog = append(changeLog, ch)
 				if len(changeLog) > changeLogMax {

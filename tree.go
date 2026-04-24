@@ -163,21 +163,39 @@ func RemoveNode(root *DiskItemInfo, relPath string) {
 	}
 }
 
+// refreshDirChildren очищает Items у каталога по relPath и заново заполняет их с диска.
+// absRoot — абсолютный корень наблюдения (тот же базовый путь, что у FileChange.FullPath).
+func refreshDirChildren(root *DiskItemInfo, relPath, absRoot string) error {
+	node := FindNode(root, relPath)
+	if node == nil || node.IsFile {
+		return nil
+	}
+	node.Items = nil
+	dirAbs := filepath.Join(absRoot, filepath.FromSlash(relPath))
+	return scanChildren(node, dirAbs)
+}
+
+func refreshDirIfNeeded(root *DiskItemInfo, ch FileChange, absRoot string) error {
+	if ch.IsFile || absRoot == "" {
+		return nil
+	}
+	return refreshDirChildren(root, ch.FullPath, absRoot)
+}
+
 // ApplyChange применяет одно событие изменения к дереву.
-// Возвращает (возможно скорректированное) событие и признак, было ли оно применено.
+// Возвращает (возможно скорректированное) событие, признак применения и ошибку пересканирования каталога.
 //
-//   - Created / Modified → добавить или обновить узел
-//   - Removed            → пометить узел (анимация), фактическое удаление
-//     из дерева после интервала анимации цвета в treeColorAnimator (ChangingColorTime или ChangingColorTimeDiff)
-//   - Renamed            → удалить старый узел (FullPath уже новый путь),
-//     добавить новый с ChangeType = Renamed
-func ApplyChange(root *DiskItemInfo, ch FileChange) (FileChange, bool) {
+//   - Created / Modified → добавить или обновить узел; для каталога — пересканировать детей с диска
+//   - Removed            → для каталога сразу убрать из дерева (без анимации; старое имя при переименовании);
+//     для файла — пометить и удалить после анимации в treeColorAnimator
+//   - Renamed            → добавить узел по новому пути (FullPath); для каталога — пересканировать детей
+func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange, bool, error) {
 	node := FindNode(root, ch.FullPath)
 
 	// Если узел уже помечен как Removed, игнорируем любые последующие
 	// события для этого же пути, чтобы не "оживлять" удалённый файл.
 	if node != nil && node.ChangeType == Removed {
-		return ch, false
+		return ch, false, nil
 	}
 
 	// Для Removed в watcher IsFile не заполняется (файла уже нет на диске).
@@ -189,10 +207,18 @@ func ApplyChange(root *DiskItemInfo, ch FileChange) (FileChange, bool) {
 	switch ch.ChangeType {
 	case Created, Modified:
 		AddNode(root, ch)
+		if err := refreshDirIfNeeded(root, ch, absRoot); err != nil {
+			return ch, true, err
+		}
 
 	case Removed:
 		if node == nil {
-			return ch, false
+			return ch, false, nil
+		}
+		if !node.IsFile {
+			// Каталог (в т.ч. старое имя при переименовании): сразу убрать из дерева, без анимации удаления.
+			RemoveNode(root, ch.FullPath)
+			break
 		}
 		node.ChangeType = Removed
 		node.ChangeTime = ch.Time
@@ -200,18 +226,17 @@ func ApplyChange(root *DiskItemInfo, ch FileChange) (FileChange, bool) {
 		node.Color = removedColor
 
 	case Renamed:
-		// fswatcher на Windows присылает EventRename на старый путь (удалить)
-		// и EventRename на новый путь (добавить). Сюда приходит уже новый путь
-		// с ChangeType=Renamed — просто добавляем узел.
-		// Удаление старого узла выполняется снаружи (в watcher.go) перед вызовом
-		// ApplyChange с Removed.
+		// fswatcher на Windows: старый путь → Removed, новый → Renamed; здесь уже новый FullPath.
 		AddNode(root, ch)
+		if err := refreshDirIfNeeded(root, ch, absRoot); err != nil {
+			return ch, true, err
+		}
 
 	case None:
 		// нечего делать
 	}
 
-	return ch, true
+	return ch, true, nil
 }
 
 // UpdateChangeType обновляет ChangeType и ChangeTime существующего узла.
