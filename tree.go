@@ -164,21 +164,35 @@ func RemoveNode(root *DiskItemInfo, relPath string) {
 }
 
 // ApplyChange применяет одно событие изменения к дереву.
+// Возвращает (возможно скорректированное) событие и признак, было ли оно применено.
 //
 //   - Created / Modified → добавить или обновить узел
 //   - Removed            → пометить узел (анимация), фактическое удаление
 //     из дерева после интервала анимации цвета в treeColorAnimator (ChangingColorTime или ChangingColorTimeDiff)
 //   - Renamed            → удалить старый узел (FullPath уже новый путь),
 //     добавить новый с ChangeType = Renamed
-func ApplyChange(root *DiskItemInfo, ch FileChange) {
+func ApplyChange(root *DiskItemInfo, ch FileChange) (FileChange, bool) {
+	node := FindNode(root, ch.FullPath)
+
+	// Если узел уже помечен как Removed, игнорируем любые последующие
+	// события для этого же пути, чтобы не "оживлять" удалённый файл.
+	if node != nil && node.ChangeType == Removed {
+		return ch, false
+	}
+
+	// Для Removed в watcher IsFile не заполняется (файла уже нет на диске).
+	// Берём признак из дерева, иначе каталог может ошибочно отображаться как файл.
+	if ch.ChangeType == Removed && node != nil {
+		ch.IsFile = node.IsFile
+	}
+
 	switch ch.ChangeType {
 	case Created, Modified:
 		AddNode(root, ch)
 
 	case Removed:
-		node := FindNode(root, ch.FullPath)
 		if node == nil {
-			return
+			return ch, false
 		}
 		node.ChangeType = Removed
 		node.ChangeTime = ch.Time
@@ -196,6 +210,8 @@ func ApplyChange(root *DiskItemInfo, ch FileChange) {
 	case None:
 		// нечего делать
 	}
+
+	return ch, true
 }
 
 // UpdateChangeType обновляет ChangeType и ChangeTime существующего узла.

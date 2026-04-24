@@ -121,17 +121,13 @@ func RunMainUI(
 
 		case ch := <-updates:
 			uiMutex.Lock()
-			// Removed: в watcher IsFile не заполняется (файла уже нет на диске).
-			// Берём признак из дерева, иначе каталог ошибочно рисуется в квадратных скобках как путь.
-			if ch.ChangeType == Removed {
-				if n := FindNode(tree, ch.FullPath); n != nil {
-					ch.IsFile = n.IsFile
+			var applied bool
+			ch, applied = ApplyChange(tree, ch)
+			if applied {
+				changeLog = append(changeLog, ch)
+				if len(changeLog) > changeLogMax {
+					changeLog = changeLog[len(changeLog)-changeLogMax:]
 				}
-			}
-			ApplyChange(tree, ch)
-			changeLog = append(changeLog, ch)
-			if len(changeLog) > changeLogMax {
-				changeLog = changeLog[len(changeLog)-changeLogMax:]
 			}
 			uiMutex.Unlock()
 			colAnimator.Notify()
