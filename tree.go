@@ -266,6 +266,33 @@ func tryApplyAsRename(root *DiskItemInfo, ch FileChange, absRoot string) bool {
 	return false
 }
 
+// tryApplyFileRename проверяет, не является ли Renamed-файл переименованием
+// существующего файла в том же родителе. Ищет среди соседей узел с IsFile=true,
+// ChangeType=Removed и совпадающим размером. Если найден — переименовывает
+// его на месте, устанавливает ChangeType=Modified и возвращает true.
+func tryApplyFileRename(root *DiskItemInfo, ch FileChange) bool {
+	parent, newName := findParent(root, ch.FullPath)
+	if parent == nil {
+		return false
+	}
+
+	for _, sibling := range parent.Items {
+		if !sibling.IsFile || sibling.Name == newName {
+			continue
+		}
+		if sibling.ChangeType == Removed && sibling.Size == ch.Size {
+			sibling.Name = newName
+			sibling.Size = ch.Size
+			sibling.ChangeType = Modified
+			sibling.ChangeTime = ch.Time
+			sibling.IsUpdating = true
+			sibling.Color = changedFileColor
+			return true
+		}
+	}
+	return false
+}
+
 // AppendLine добавляет строку в конец файла
 func AppendFileLine(filename string, line string) error {
 	// Открываем файл:
@@ -292,8 +319,9 @@ func AppendFileLine(filename string, line string) error {
 //   - Created / Modified → добавить или обновить узел
 //   - Removed            → пометить узел (анимация), фактическое удаление
 //     из дерева после интервала анимации цвета в treeColorAnimator (ChangingColorTime или ChangingColorTimeDiff)
-//   - Renamed            → для каталога: сопоставить по хешу содержимого с соседом
-//     и переименовать на месте; для файла: обычный AddNode
+	//   - Renamed            → для каталога: сопоставить по хешу содержимого с соседом
+	//     и переименовать на месте; для файла: сопоставить по размеру с Removed-соседом
+	//     и переименовать на месте (ChangeType=Modified)
 func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange, bool) {
 	node := FindNode(root, ch.FullPath)
 
@@ -327,7 +355,7 @@ func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange,
 		// и EventRename на новый путь (добавить). Сюда приходит уже новый путь.
 		// Для каталога: пытаемся найти совпадение по хешу содержимого среди соседей
 		// и переименовать узел на месте (сохраняет вложенные файлы).
-		// Для файла: обычный AddNode.
+		// Для файла: пытаемся найти Removed-сосед с тем же размером и переименовать.
 		if !ch.IsFile && absRoot != "" {
 			if tryApplyAsRename(root, ch, absRoot) {
 				break
@@ -338,7 +366,9 @@ func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange,
 				return ch, true
 			}
 		} else {
-			AddNode(root, ch)
+			if !tryApplyFileRename(root, ch) {
+				AddNode(root, ch)
+			}
 		}
 
 	case None:
