@@ -95,8 +95,9 @@ func RunMainUI(
 	const changeLogMax = 2000
 
 	repaintCh := make(chan struct{}, 1)
+	missingCh := make(chan FileChange, 16)
 	mainUITree = tree
-	colAnimator = newTreeColorAnimator(tree, &uiMutex, ctx, repaintCh)
+	colAnimator = newTreeColorAnimator(tree, &uiMutex, ctx, repaintCh, absRoot, missingCh)
 
 	viewMode = appViewTree
 	verticalOffset = 0
@@ -138,7 +139,20 @@ func RunMainUI(
 			}
 			uiMutex.Unlock()
 			colAnimator.Notify()
+			mainRedraw()
 
+		case ch := <-missingCh:
+			uiMutex.Lock()
+			var applied bool
+			ch, applied = ApplyChange(tree, ch, absRoot)
+			if applied {
+				changeLog = append(changeLog, ch)
+				if len(changeLog) > changeLogMax {
+					changeLog = changeLog[len(changeLog)-changeLogMax:]
+				}
+			}
+			uiMutex.Unlock()
+			colAnimator.Notify()
 			mainRedraw()
 
 		case <-repaintCh:

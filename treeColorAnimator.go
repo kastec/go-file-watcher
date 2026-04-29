@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"image/color"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,16 +32,19 @@ func endColorForUpdatingNode(node *DiskItemInfo) color.Color {
 	return defaultColorForNode(node)
 }
 
-func applyTreeColors(root *DiskItemInfo, now time.Time, blend time.Duration) (needRepaint bool) {
-	return walkItems(&root.Items, now, blend)
+func applyTreeColors(root *DiskItemInfo, now time.Time, blend time.Duration, absRoot string) (needRepaint bool, missing []FileChange) {
+	return walkItems(&root.Items, "", now, blend, absRoot)
 }
 
-func walkItems(items *[]*DiskItemInfo, now time.Time, blend time.Duration) (needRepaint bool) {
+func walkItems(items *[]*DiskItemInfo, relPathPrefix string, now time.Time, blend time.Duration, absRoot string) (needRepaint bool, missing []FileChange) {
 	for i := 0; i < len(*items); {
 		node := (*items)[i]
-		if walkItems(&node.Items, now, blend) {
+		childRepaint, childMissing := walkItems(&node.Items, relPathPrefix+node.Name+"/", now, blend, absRoot)
+		if childRepaint {
 			needRepaint = true
 		}
+		missing = append(missing, childMissing...)
+
 		if node.IsUpdating {
 			elapsed := now.Sub(node.ChangeTime)
 			if elapsed >= blend {
@@ -51,6 +56,22 @@ func walkItems(items *[]*DiskItemInfo, now time.Time, blend time.Duration) (need
 				node.IsUpdating = false
 				node.Color = defaultColorForNode(node)
 				needRepaint = true
+
+				// После завершения анимации проверяем наличие элемента на диске.
+				// Если элемент исчез — формируем событие удаления.
+				if absRoot != "" {
+					relPath := relPathPrefix + node.Name
+					absPath := filepath.Join(absRoot, filepath.FromSlash(relPath))
+					if _, err := os.Stat(absPath); os.IsNotExist(err) {
+						missing = append(missing, FileChange{
+							Time:       now,
+							ChangeType: Removed,
+							IsFile:     node.IsFile,
+							Name:       node.Name,
+							FullPath:   relPath,
+						})
+					}
+				}
 			} else {
 				start := startColorForNode(node)
 				end := endColorForUpdatingNode(node)
@@ -60,7 +81,7 @@ func walkItems(items *[]*DiskItemInfo, now time.Time, blend time.Duration) (need
 		}
 		i++
 	}
-	return needRepaint
+	return
 }
 
 // treeColorAnimator периодически обновляет поле Color у узлов с IsUpdating.
@@ -69,17 +90,21 @@ type treeColorAnimator struct {
 	mu      *sync.RWMutex
 	ctx     context.Context
 	repaint chan<- struct{}
+	absRoot string
+	missing chan<- FileChange
 
 	running   atomic.Bool
 	blendNano atomic.Int64 // time.Duration наносекунды; по умолчанию ChangingColorTime
 }
 
-func newTreeColorAnimator(tree *DiskItemInfo, mu *sync.RWMutex, ctx context.Context, repaint chan<- struct{}) *treeColorAnimator {
+func newTreeColorAnimator(tree *DiskItemInfo, mu *sync.RWMutex, ctx context.Context, repaint chan<- struct{}, absRoot string, missing chan<- FileChange) *treeColorAnimator {
 	a := &treeColorAnimator{
 		tree:    tree,
 		mu:      mu,
 		ctx:     ctx,
 		repaint: repaint,
+		absRoot: absRoot,
+		missing: missing,
 	}
 	a.blendNano.Store(int64(ChangingColorTime))
 	return a
@@ -115,9 +140,17 @@ func (a *treeColorAnimator) run() {
 		case <-ticker.C:
 			a.mu.Lock()
 			now := time.Now()
-			needRepaint := applyTreeColors(a.tree, now, a.blendDuration())
-			//keepRunning := needRepaint || anyUpdating(a.tree)
+			needRepaint, missing := applyTreeColors(a.tree, now, a.blendDuration(), a.absRoot)
 			a.mu.Unlock()
+
+			for _, fc := range missing {
+				if a.missing != nil {
+					select {
+					case a.missing <- fc:
+					default:
+					}
+				}
+			}
 
 			if needRepaint {
 				select {
@@ -128,9 +161,6 @@ func (a *treeColorAnimator) run() {
 			if !needRepaint {
 				return
 			}
-			// if !keepRunning {
-			// 	return
-			// }
 		}
 	}
 }
