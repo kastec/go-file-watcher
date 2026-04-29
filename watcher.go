@@ -94,10 +94,13 @@ func dispatchChange(ctx context.Context, ch FileChange, absRoot string, out chan
 // convertEvent преобразует fswatcher.WatchEvent в один или два FileChange.
 //
 // Для EventRename на Windows fswatcher присылает два отдельных события:
-//   - старый путь (файл уже не существует) → Removed
-//   - новый путь  (файл существует на диске) → Renamed
+//   - старый путь (уже не существует) → Removed
+//   - новый путь  (существует на диске) → Renamed (для файлов и каталогов)
 //
-// Различаем их через os.Stat: существует → Renamed, нет → Removed.
+// Это позволяет корректно обрабатывать переименование каталогов внутри root:
+// сначала старый путь получает Removed (анимация удаления), затем новый путь
+// добавляется как Renamed.
+//
 // Для всех остальных типов возвращается ровно один FileChange.
 // fullPath в FileChange — путь относительно absRoot.
 func convertEvent(event fswatcher.WatchEvent, absRoot string) []FileChange {
@@ -119,14 +122,13 @@ func convertEvent(event fswatcher.WatchEvent, absRoot string) []FileChange {
 
 	switch ct {
 	case Renamed:
-		// Определяем тип по наличию файла на диске.
-		// Старый путь (уже удалён) → Removed.
-		// Новый путь (существует)   → Renamed + метаданные.
+		// Старый путь (уже не существует) → Removed.
+		// Новый путь (существует) → Renamed для файлов и каталогов.
 		if _, err := os.Stat(event.Path); err != nil {
 			ch.ChangeType = Removed
 		} else {
-			ch.ChangeType = Renamed
 			fillFromDisk(&ch, event.Path)
+			ch.ChangeType = Renamed
 		}
 
 	case Removed:

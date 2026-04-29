@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,27 +177,130 @@ func refreshDirChildren(root *DiskItemInfo, relPath, absRoot string) error {
 	return scanChildren(node, dirAbs)
 }
 
-func refreshDirIfNeeded(root *DiskItemInfo, ch FileChange, absRoot string) error {
-	if ch.IsFile || absRoot == "" {
-		return nil
+// namesHash вычисляет порядко-независимый хеш набора имён файлов/каталогов.
+// Хеширует каждое имя через FNV-64a и суммирует результаты.
+// Возвращает 0 для пустого набора.
+func namesHash(names []string) uint64 {
+	var sum uint64
+	for _, name := range names {
+		h := fnv.New64a()
+		h.Write([]byte(name))
+		sum += h.Sum64()
 	}
-	return refreshDirChildren(root, ch.FullPath, absRoot)
+	return sum
+}
+
+// dirDiskHash читает одноуровневое содержимое каталога по absPath с диска
+// и возвращает его namesHash. Возвращает 0 при ошибке или пустом каталоге.
+func dirDiskHash(absPath string) uint64 {
+	entries, err := os.ReadDir(absPath)
+	if err != nil || len(entries) == 0 {
+		return 0
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return namesHash(names)
+}
+
+// dirNodeHash вычисляет namesHash содержимого каталога по его Items в дереве.
+// Возвращает 0 для каталога без детей.
+func dirNodeHash(node *DiskItemInfo) uint64 {
+	if len(node.Items) == 0 {
+		return 0
+	}
+	names := make([]string, len(node.Items))
+	for i, item := range node.Items {
+		names[i] = item.Name
+	}
+	return namesHash(names)
+}
+
+// resetSubtreeChangeType рекурсивно сбрасывает ChangeType и анимацию
+// у всех потомков node. Используется при обнаружении переименования каталога,
+// чтобы его дети не продолжали анимироваться как удалённые.
+func resetSubtreeChangeType(node *DiskItemInfo) {
+	for _, child := range node.Items {
+		child.ChangeType = None
+		child.IsUpdating = false
+		child.Color = defaultColorForNode(child)
+		resetSubtreeChangeType(child)
+	}
+}
+
+// tryApplyAsRename проверяет, не является ли Created-каталог переименованием
+// существующего каталога в том же родителе. Сравнивает хеш содержимого
+// нового каталога (с диска) с хешами Items соседних каталогов в дереве.
+// Если найдено совпадение — переименовывает узел на месте и возвращает true.
+// Пустые каталоги (hash == 0) не проверяются: слишком высок риск ложных совпадений.
+func tryApplyAsRename(root *DiskItemInfo, ch FileChange, absRoot string) bool {
+	absPath := filepath.Join(absRoot, filepath.FromSlash(ch.FullPath))
+	newHash := dirDiskHash(absPath)
+	if newHash == 0 {
+		return false
+	}
+
+	parent, newName := findParent(root, ch.FullPath)
+	if parent == nil {
+		return false
+	}
+
+	for _, sibling := range parent.Items {
+		if sibling.IsFile || sibling.Name == newName {
+			continue
+		}
+		nodeHash := dirNodeHash(sibling)
+		AppendFileLine("log.txt", fmt.Sprintf("nodeHash: %d, newHash: %d", nodeHash, newHash))
+		if nodeHash == newHash {
+			// Нашли старый каталог с тем же содержимым — это переименование.
+			sibling.Name = newName
+			sibling.ChangeType = Created
+			sibling.ChangeTime = ch.Time
+			sibling.IsUpdating = true
+			sibling.Color = changedFileColor
+			resetSubtreeChangeType(sibling)
+			return true
+		}
+	}
+	return false
+}
+
+// AppendLine добавляет строку в конец файла
+func AppendFileLine(filename string, line string) error {
+	// Открываем файл:
+	// O_APPEND — добавлять в конец
+	// O_CREATE — создать, если не существует
+	// O_WRONLY — только для записи
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Добавляем строку и символ переноса строки
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // ApplyChange применяет одно событие изменения к дереву.
-// Возвращает (возможно скорректированное) событие, признак применения и ошибку пересканирования каталога.
+// Возвращает (возможно скорректированное) событие и признак, было ли оно применено.
 //
-//   - Created / Modified → добавить или обновить узел; для каталога — пересканировать детей с диска
-//   - Removed            → для каталога сразу убрать из дерева (без анимации; старое имя при переименовании);
-//     для файла — пометить и удалить после анимации в treeColorAnimator
-//   - Renamed            → добавить узел по новому пути (FullPath); для каталога — пересканировать детей
-func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange, bool, error) {
+//   - Created / Modified → добавить или обновить узел
+//   - Removed            → пометить узел (анимация), фактическое удаление
+//     из дерева после интервала анимации цвета в treeColorAnimator (ChangingColorTime или ChangingColorTimeDiff)
+//   - Renamed            → для каталога: сопоставить по хешу содержимого с соседом
+//     и переименовать на месте; для файла: обычный AddNode
+func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange, bool) {
 	node := FindNode(root, ch.FullPath)
 
 	// Если узел уже помечен как Removed, игнорируем любые последующие
 	// события для этого же пути, чтобы не "оживлять" удалённый файл.
 	if node != nil && node.ChangeType == Removed {
-		return ch, false, nil
+		return ch, false
 	}
 
 	// Для Removed в watcher IsFile не заполняется (файла уже нет на диске).
@@ -203,22 +308,14 @@ func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange,
 	if ch.ChangeType == Removed && node != nil {
 		ch.IsFile = node.IsFile
 	}
-
+	AppendFileLine("./log.txt", fmt.Sprint("ch: ", ch.Name, "ch.ChangeType:", ch.ChangeType))
 	switch ch.ChangeType {
 	case Created, Modified:
 		AddNode(root, ch)
-		if err := refreshDirIfNeeded(root, ch, absRoot); err != nil {
-			return ch, true, err
-		}
 
 	case Removed:
 		if node == nil {
-			return ch, false, nil
-		}
-		if !node.IsFile {
-			// Каталог (в т.ч. старое имя при переименовании): сразу убрать из дерева, без анимации удаления.
-			RemoveNode(root, ch.FullPath)
-			break
+			return ch, false
 		}
 		node.ChangeType = Removed
 		node.ChangeTime = ch.Time
@@ -226,17 +323,29 @@ func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange,
 		node.Color = removedColor
 
 	case Renamed:
-		// fswatcher на Windows: старый путь → Removed, новый → Renamed; здесь уже новый FullPath.
-		AddNode(root, ch)
-		if err := refreshDirIfNeeded(root, ch, absRoot); err != nil {
-			return ch, true, err
+		// fswatcher на Windows присылает EventRename на старый путь (удалить)
+		// и EventRename на новый путь (добавить). Сюда приходит уже новый путь.
+		// Для каталога: пытаемся найти совпадение по хешу содержимого среди соседей
+		// и переименовать узел на месте (сохраняет вложенные файлы).
+		// Для файла: обычный AddNode.
+		if !ch.IsFile && absRoot != "" {
+			if tryApplyAsRename(root, ch, absRoot) {
+				break
+			}
+			// Совпадение не найдено — добавляем как новый каталог с перечитыванием.
+			AddNode(root, ch)
+			if err := refreshDirChildren(root, ch.FullPath, absRoot); err != nil {
+				return ch, true
+			}
+		} else {
+			AddNode(root, ch)
 		}
 
 	case None:
 		// нечего делать
 	}
 
-	return ch, true, nil
+	return ch, true
 }
 
 // UpdateChangeType обновляет ChangeType и ChangeTime существующего узла.

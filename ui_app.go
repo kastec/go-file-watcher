@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -129,10 +129,7 @@ func RunMainUI(
 		case ch := <-updates:
 			uiMutex.Lock()
 			var applied bool
-			ch, applied, err := ApplyChange(tree, ch, absRoot)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "пересканирование каталога: %v\n", err)
-			}
+			ch, applied = ApplyChange(tree, ch, absRoot)
 			if applied {
 				changeLog = append(changeLog, ch)
 				if len(changeLog) > changeLogMax {
