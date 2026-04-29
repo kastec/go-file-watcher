@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -251,7 +250,7 @@ func tryApplyAsRename(root *DiskItemInfo, ch FileChange, absRoot string) bool {
 			continue
 		}
 		nodeHash := dirNodeHash(sibling)
-		AppendFileLine("log.txt", fmt.Sprintf("nodeHash: %d, newHash: %d", nodeHash, newHash))
+		//AppendFileLine("log.txt", fmt.Sprintf("nodeHash: %d, newHash: %d", nodeHash, newHash))
 		if nodeHash == newHash {
 			// Нашли старый каталог с тем же содержимым — это переименование.
 			sibling.Name = newName
@@ -319,9 +318,9 @@ func AppendFileLine(filename string, line string) error {
 //   - Created / Modified → добавить или обновить узел
 //   - Removed            → пометить узел (анимация), фактическое удаление
 //     из дерева после интервала анимации цвета в treeColorAnimator (ChangingColorTime или ChangingColorTimeDiff)
-	//   - Renamed            → для каталога: сопоставить по хешу содержимого с соседом
-	//     и переименовать на месте; для файла: сопоставить по размеру с Removed-соседом
-	//     и переименовать на месте (ChangeType=Modified)
+//   - Renamed            → для каталога: сопоставить по хешу содержимого с соседом
+//     и переименовать на месте; для файла: сопоставить по размеру с Removed-соседом
+//     и переименовать на месте (ChangeType=Modified)
 func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange, bool) {
 	node := FindNode(root, ch.FullPath)
 
@@ -336,7 +335,7 @@ func ApplyChange(root *DiskItemInfo, ch FileChange, absRoot string) (FileChange,
 	if ch.ChangeType == Removed && node != nil {
 		ch.IsFile = node.IsFile
 	}
-	AppendFileLine("./log.txt", fmt.Sprint("ch: ", ch.Name, "ch.ChangeType:", ch.ChangeType))
+	//AppendFileLine("./log.txt", fmt.Sprint("ch: ", ch.Name, "ch.ChangeType:", ch.ChangeType))
 	switch ch.ChangeType {
 	case Created, Modified:
 		AddNode(root, ch)
